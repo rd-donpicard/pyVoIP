@@ -1,8 +1,13 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from pyVoIP import regex
 from pyVoIP.types import URI_HEADER
 from pyVoIP.SIP.error import SIPParseError
 import pyVoIP
+
+import email
+import sys
+from email import policy
+from email.parser import BytesParser
 
 
 # Compacts defined in RFC 3261 Section 7.3.3 and 20
@@ -19,6 +24,31 @@ COMPACT_KEY = {
     "v": "Via",
 }
 
+def parse_message_for_body_parts(data: bytes) -> List[Tuple[str, Any]]:
+    body_parts: List[Tuple[str, Any]] = []
+    SDP_CT = 'application/sdp'
+
+    # Convert the body into bytes and parse using email parser
+    # We cannot feed a SIP packet directly into the mime parser - we have to remove the non-compliant
+    # first line (the request or response line) first
+    reqline, remainder = data.split(b"\n", 1)
+    message = BytesParser(policy=policy.default).parsebytes(remainder)
+    
+    # Walk through the MIME parts.  Technically this might need to be recursive, but we can ignore that for now
+    if message.is_multipart():
+        for part in message.iter_parts():
+            content_type = part.get_content_type()
+            payload = part.get_payload(decode=True)
+            if content_type == SDP_CT:
+                sdp_dict = parse_raw_sdp(payload, content_type)
+                body_parts.append((content_type, sdp_dict))
+            else:
+                body_parts.append((content_type, payload.decode()))
+    else:
+        sdp_dict = parse_raw_sdp(message.get_content(), SDP_CT)
+        body_parts.append((SDP_CT, sdp_dict))
+
+    return body_parts
 
 def parse_raw_headers(raw_headers: List[bytes]) -> Dict[str, Any]:
     headers: Dict[str, Any] = {"Via": []}
@@ -42,7 +72,7 @@ def parse_raw_headers(raw_headers: List[bytes]) -> Dict[str, Any]:
     return parsed_headers
 
 
-def parse_raw_body(body: bytes, ctype: str) -> Dict[str, Any]:
+def parse_raw_sdp(body: bytes, ctype: str) -> Dict[str, Any]:
     if len(body) > 0:
         if ctype == "application/sdp":
             parsed_body: Dict[str, Any] = {}
@@ -52,10 +82,8 @@ def parse_raw_body(body: bytes, ctype: str) -> Dict[str, Any]:
                 if i != [""]:
                     parse_sdp_tag(parsed_body, i[0], i[1])
             return parsed_body
-        else:
-            return {"content": body}
+    # really this should only be invoked with the sdp and it should be an error if there isn't one
     return {"content": None}
-
 
 def get_uri_header(data: str) -> URI_HEADER:
     info = data.split(";tag=")

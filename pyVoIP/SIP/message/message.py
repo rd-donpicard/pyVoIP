@@ -3,14 +3,13 @@ from pyVoIP import regex
 from pyVoIP.SIP.error import SIPParseError
 from pyVoIP.SIP.message.parse import (
     parse_raw_headers,
-    parse_raw_body,
+    parse_message_for_body_parts,
     get_uri_header,
 )
 from pyVoIP.SIP.message.response_codes import ResponseCode
 from pyVoIP.types import URI_HEADER
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Tuple
 import pyVoIP
-
 
 __all__ = ["SIPMethod", "SIPMessage", "SIPRequest", "SIPResponse"]
 
@@ -42,15 +41,27 @@ class SIPMessage:
         self,
         start_line: List[str],
         headers: Dict[str, Any],
-        body: Dict[str, Any],
+        body_parts: List[Tuple[str, Any]],
         authentication: Dict[str, Union[str, List[str]]],
         raw: bytes,
     ):
         self.start_line = start_line
         self.headers = headers
-        self.body = body
         self.authentication = authentication
         self.raw = raw
+        self.body_parts = body_parts
+
+        # Sadly this code uses "body" when it really means "sdp".
+        # In order to support SIPREC (which has multiple body parts, including an sdp)
+        # parse_message_for_body_parts returns a List[Typle(str, Any)].  We keep the list that comes
+        # back, and we also try to find the SDP in the list and if so pass it along to
+        # the derived class.  I did this really to maintain compatibility with the rest of the
+        # code in this package (which kinda all require that the body is the sdp if there is one)
+        sdp_tuple = next((t for t in body_parts if t[0] == "application/sdp"), None)
+        if sdp_tuple:
+            self.body = sdp_tuple[1]
+        else:
+            self.body = {'content': None}
 
     def summary(self) -> str:
         data = ""
@@ -63,8 +74,8 @@ class SIPMessage:
         for x in self.body:
             data += f"{x}: {self.body[x]}\n"
         data += "\n"
-        data += "Raw:\n"
-        data += str(self.raw)
+        data += "All Body Parts:\n"
+        data += str(self.body_parts)
 
         return data
 
@@ -77,7 +88,7 @@ class SIPMessage:
 
         try:
             try:
-                headers, body = data.split(b"\r\n\r\n")
+                headers, body = data.split(b"\r\n\r\n", maxsplit=1)
             except ValueError as ve:
                 debug(f"Error unpacking data, only using headers. ({ve})")
                 headers = data
@@ -118,15 +129,15 @@ class SIPMessage:
             elif "Proxy-Authenticate" in parsed_headers:
                 authentication = parsed_headers["Proxy-Authenticate"]
 
-            parsed_body = parse_raw_body(
-                body, parsed_headers.get("Content-Type", "text/plain")
-            )
+            # We have to send in the entire message because a multipart body
+            # has the boundary defined in the header
+            body_parts = parse_message_for_body_parts(data)
 
             if response:
                 return SIPResponse(
                     start_line,
                     parsed_headers,
-                    parsed_body,
+                    body_parts,
                     authentication,
                     data,
                     status,
@@ -134,7 +145,7 @@ class SIPMessage:
             return SIPRequest(
                 start_line,
                 parsed_headers,
-                parsed_body,
+                body_parts,
                 authentication,
                 data,
                 method,

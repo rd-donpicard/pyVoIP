@@ -1,5 +1,7 @@
 dist/
+build/
 pyVoIP.egg-info
 __pycache__
 venv
+tmp
 *.swp
